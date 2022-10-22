@@ -4,16 +4,28 @@ import math
 import numpy as np
 from sensor_msgs.msg import LaserScan
 from geometry_msgs.msg import Vector3
+from matplotlib import pyplot as plt
+from states import traverse
 
-FPS = 30
-SCALING = 0.01
-MAX_ACC= 35.
-target_vel = np.array([0,0], np.float32)
+# constants and global variables
+FPS = 30.
+T = 1.0/FPS
+bird_position = np.array([0., 0.], np.float32)
+X_THRES=1.7
+Y_TOP_THRES=1.7
+Y_BOTTOM_THRES=-0.6#-1.1
+accum_points = np.zeros((2,9), dtype=np.float32)
+STATE=''
+SCAN_STATE='WAITING'
+TRAVERSE_STATE = 'WAITING'
+y_coord_hole = None
+desired_acc = np.array([0,0], np.float32)
 current_vel = np.array([0,0], np.float32)
-x_vel = 0.
-accum_y_distances = np.zeros((8,1), dtype=np.float32)
-TOLERANCE = 0.15
-dt=0.5
+e_prev = 0.0
+e_sum = 0.0
+goal = 0
+semaphore = 0
+TOTAL_POINTS=1500
 
 # Publisher for sending acceleration commands to flappy bird
 pub_acc_cmd = rospy.Publisher('/flappy_acc', Vector3, queue_size=1)
@@ -21,140 +33,192 @@ pub_acc_cmd = rospy.Publisher('/flappy_acc', Vector3, queue_size=1)
 def initNode():
     # Here we initialize our node running the automation code
     rospy.init_node('flappy_automation_code', anonymous=True)
-
+    
     # Subscribe to topics for velocity and laser scan from Flappy Bird game
     rospy.Subscriber("/flappy_vel", Vector3, velCallback)
     rospy.Subscriber("/flappy_laser_scan", LaserScan, laserScanCallback)
-
 
     # Ros spin to prevent program from exiting
     rospy.spin()
 
 def velCallback(msg):
     # msg has the format of geometry_msgs::Vector3
-    # Example of publishing acceleration command on velocity velCallback
+    # update bird position
+    global bird_position, current_vel
+    current_vel[0] = msg.x
+    current_vel[1] = msg.y
+    bird_position[0] += msg.x * T
+    bird_position[1] += msg.y * T
+
     
-    global current_vel
-
-    if not np.any(current_vel):
-        current_vel = np.array([x_vel,0])
-
-    direction = 1
-    if target_vel[1] < 0:
-        direction = -1        
-
-    vel_cmd = abs(target_vel) - abs(current_vel)
-    vel_cmd *= direction
-
-    # print(target_vel[1], current_vel[1])
-    # print('vel_cmd= {}'.format(vel_cmd[1]))
-    # print('current velocity: {}'.format(current_vel))
-
-    current_vel = vel_cmd
-
-    # pub_acc_cmd.publish(Vector3(vel_cmd[0], vel_cmd[1], 0))
-
+    pub_acc_cmd.publish(Vector3((desired_acc[0]-current_vel[0]), (desired_acc[1]-current_vel[1]), 0))
+    # pub_acc_cmd.publish(Vector3(desired_acc[0], desired_acc[1], 0))
 
 def laserScanCallback(msg):
     # msg has the format of sensor_msgs::LaserScan
     # print laser angle and range
-    
-    global target_vel, current_vel, x_vel
-    
     inc = msg.angle_increment
-    ranges = np.array(msg.ranges, dtype=np.float32()).reshape(9,)
-
-    print('intensities={}'.format(msg.intensities))
-
-    offset = 2.5
-    formatted_ranges = np.array([
-        ranges[0] if ranges[0] <= offset else np.nan,
-        ranges[1] if ranges[1] <= offset else np.nan,
-        ranges[2] if ranges[2] <= offset else np.nan,
-        ranges[3] if ranges[3] <= offset else np.nan,
-        ranges[5] if ranges[5] <= offset else np.nan,
-        ranges[6] if ranges[6] <= offset else np.nan,
-        ranges[7] if ranges[7] <= offset else np.nan,
-        ranges[8] if ranges[8] <= offset else np.nan
-    ])
-
-    # y_distances = replace_empty_with_means(y_distances)
-    formatted_ranges = replace_empty_with_means(formatted_ranges)
-
-    y_distances = np.array([
-        np.sin(inc*4)* formatted_ranges[0],# if ranges[0] <= offset else np.nan,
-        np.sin(inc*3)* formatted_ranges[1],# if ranges[1] <= offset else np.nan,
-        np.sin(inc*2)* formatted_ranges[2],# if ranges[2] <= offset else np.nan,
-        np.sin(inc)  * formatted_ranges[3],# if ranges[3] <= offset else np.nan,
-        np.sin(inc)  * formatted_ranges[4],# if ranges[4] <= offset else np.nan,
-        np.sin(inc*2)* formatted_ranges[5],# if ranges[5] <= offset else np.nan,
-        np.sin(inc*3)* formatted_ranges[6],# if ranges[6] <= offset else np.nan,
-        np.sin(inc*4)* formatted_ranges[7] # if ranges[7] <= offset else np.nan     
-    ])
+    angles = np.linspace(msg.angle_min, msg.angle_max, 9)
+    ranges = np.array(msg.ranges, dtype=np.float32())
     
-    global accum_y_distances
-    if accum_y_distances.shape[1] >= 8:
-        del accum_y_distances
-        accum_y_distances = y_distances
-    else:
-        accum_y_distances = np.hstack((accum_y_distances, y_distances))
-        y_distances = np.mean(accum_y_distances, axis=1).reshape(8,1)
-        # y_distances = np.subtract(accum_y_distances[-1], accum_y_distances[-2])
-    print(y_distances)
-    y_distances = 0.1/(y_distances**2)
-    sum_all = np.sum(y_distances[:4])-np.sum(y_distances[4:])
+    dist = np.array([bird_position[0] + np.cos(angles)*ranges, 
+                     bird_position[1] + np.sin(angles)*ranges], 
+                     np.float32)
+    global STATE
+    # print(STATE, bird_position)
+    if STATE == '':
+        STATE='GET_CLOSE'
+    state_machine(dist)
 
-    # check how many lasers pointing to inf
-    num_lasers = np.where(ranges > msg.range_max-0.1)[0].shape[0]
-    
-    if not num_lasers == 7 and not np.isnan(sum_all):
-        # print(MAX_ACC / sum_all)
-        # if floor <= 0.05 and floor > 0.1:
-        #     target_vel[1] = 0.
-        # elif ceiling <= 0.5 and ceiling > 0.1:
-        #     target_vel[1] = 0.
-        # else:
-        # if sum_all > -0.5 and sum_all < 1.0:
-        #     target_vel[1] = 0.0
-        # else:
-        if sum_all > -0.01 and sum_all < 0.01:
-            sum_all=0
-        else:
-            if ranges[4] < 2.0:
-                target_vel[1] *= current_vel[1]*0.5
-            else:
-                target_vel[1] = sum_all
+def state_machine(dist):
+    if STATE == 'GET_CLOSE':
+        get_close(dist)
+    elif STATE == 'SCAN_SEARCH':
+        out = scan_search(dist)
+    elif STATE == 'TRAVERSE':
+        traverse()
         
-        print(sum_all)
+
+
+#######################################################################
+###################### STATES AND SUBSTATE MACHINE ####################
+#######################################################################
+
+def get_close(dist):
+    global STATE
+    result = pid_controller(4.4, 1, 0.5, 0, x=True)
+    if result:
+        reset_errors()
+        STATE='SCAN_SEARCH'
+
+
+def scan_search(dist):
+    global STATE, accum_points
+
+    # collect laser rages points while scaning
+    if accum_points.shape[1] >= TOTAL_POINTS:
+        global y_coord_hole
+        hist = get_histogram(accum_points[1])
+        idx = np.argmin(hist[0])
+        y_coord_hole=(hist[1][idx] + hist[1][idx+1])/2.0        
+        del accum_points # reset accum_points
+        accum_points = dist
+        STATE = 'TRAVERSE'
+    else:
+        scan()
+        dist = np.where(dist[0] <= (bird_position[0]+X_THRES), dist, 0.0)
+        if np.count_nonzero(dist) > 10:
+            accum_points = np.hstack((accum_points, dist))
+
+# use histogram to find the empty spot
+def get_histogram(dataset):
+    return np.histogram(dataset, 15, (Y_BOTTOM_THRES, Y_TOP_THRES))
+
+# substate machine to perform scaning and find empty space
+def scan():
+    global SCAN_STATE
+    if SCAN_STATE == 'WAITING':
+        SCAN_STATE = 'GO_DOWN'
+    elif SCAN_STATE == 'GO_DOWN':
+        print('GO_DOWN')
+        if go_down():
+            SCAN_STATE = 'GO_UP'
+    elif SCAN_STATE == 'GO_UP':
+        print('GO_UP')
+        if go_up():
+            SCAN_STATE = 'WAITING'
+    return
+
+
+def go_down():
+    # result = pid_controller(-0.65, 1.5, 0, 0)
+    result = pid_controller(-0.6, 2.0, 2.1, 0.08)
+    if result:
+        reset_vars()
+        return True
+    return result
+
+def go_up():
+    # result = pid_controller(0.8, 1.5, 0, 0.)
+    result = pid_controller(0.8, 2.0, 2.1, 0.08)
+    if result:
+        reset_vars()
+        return True
+    return result
+
+# substate machine to traverse asteroid field
+def traverse():
+    global TRAVERSE_STATE
+    if TRAVERSE_STATE == 'WAITING':
+        TRAVERSE_STATE = 'GO_TO_SPACE'
+    elif TRAVERSE_STATE == 'GO_TO_SPACE':
+        if go_to_space():
+            TRAVERSE_STATE = 'TRASPASS'
+    elif TRAVERSE_STATE == 'TRASPASS':
+        traspass()
+    return
+
+# goal in y direction to empty spot in the asteroid field
+def go_to_space():
+    result = pid_controller(y_coord_hole, 2.0, 1.8, 0.08)
+    if result:
+        reset_errors()
+        return True
+
+# cross asteroid field, goal in x direction
+def traspass():
+    global goal, semaphore
+    if semaphore == 0:
+        semaphore=1
+        goal = bird_position[0]+1.9
+
+    result = pid_controller(goal, 2.0, 1., 0, x=True)
+
+    if result:
+        reset_errors()
+        reset_vars()
+    return result
+
+def reset_errors():
+    global e_sum, e_prev
+    e_sum = 0
+    e_prev = 0
+
+def reset_vars():
+    global semaphore, SCAN_STATE, TRAVERSE_STATE, y_coord_hole, STATE
+    semaphore = 0
+    SCAN_STATE='WAITING'
+    TRAVERSE_STATE = 'WAITING'
+    y_coord_hole = None
+    STATE='SCAN_SEARCH'
+
+# PID controller
+def pid_controller(g, K_P, K_D, K_I, x=False, min_error=1e-2):
+    global e_sum, e_prev
+    bird_pose=0
+
+    if x == True:
+        bird_pose=bird_position[0]     
+    else:
+        bird_pose=bird_position[1]
     
+
+    e = g - bird_pose
+    e_sum = e_sum + e * T
+    de_dt = (e - e_prev) / T
+    u = K_P * e + K_I * e_sum + K_D * de_dt
+
+    if x:
+        desired_acc[0] = u
+    else:
+        desired_acc[1] = u
     
-# replace all the nan values with the means of each corresponding part (above/below the front laser)
-def replace_empty_with_means(y_distances):
-    a = y_distances[:4]
-    b = y_distances[4:]
-
-    a_ind = np.argwhere(np.isnan(a))
-    b_ind = np.argwhere(np.isnan(b))
-    a_mean = np.nanmean(a)
-    b_mean = np.nanmean(b)
-
-    a[a_ind] = a_mean
-    b[b_ind] = b_mean
-    concat = np.hstack((a, b))
-    return concat.reshape(8,1)
-
-
-def is_close_to_wall(y_distances):
-    first = y_distances[0]
-    last = y_distances[7]
-
-    floor = np.cos(45)*first
-    ceiling = np.cos(45)*last
-
-    print('floot={} \t ceiling={}'.format(floor, ceiling))
-    return floor, ceiling
-
-    
+    print('error={}, u={}'.format(abs(abs(g) - abs(bird_pose)), u))
+    e_prev = e
+    if abs(abs(g) - abs(bird_pose)) < min_error:
+        return True
+    else:
+        return False
 
 
 if __name__ == '__main__':
