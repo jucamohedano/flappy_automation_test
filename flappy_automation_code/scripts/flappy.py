@@ -25,7 +25,7 @@ e_prev = 0.0
 e_sum = 0.0
 goal = 0
 semaphore = 0
-TOTAL_POINTS=1500
+TOTAL_POINTS=1100
 
 # Publisher for sending acceleration commands to flappy bird
 pub_acc_cmd = rospy.Publisher('/flappy_acc', Vector3, queue_size=1)
@@ -51,8 +51,8 @@ def velCallback(msg):
     bird_position[1] += msg.y * T
 
     
-    pub_acc_cmd.publish(Vector3((desired_acc[0]-current_vel[0]), (desired_acc[1]-current_vel[1]), 0))
-    # pub_acc_cmd.publish(Vector3(desired_acc[0], desired_acc[1], 0))
+    # pub_acc_cmd.publish(Vector3((desired_acc[0]-current_vel[0]), (desired_acc[1]-current_vel[1]), 0))
+    pub_acc_cmd.publish(Vector3(desired_acc[0], desired_acc[1], 0))
 
 def laserScanCallback(msg):
     # msg has the format of sensor_msgs::LaserScan
@@ -86,7 +86,9 @@ def state_machine(dist):
 
 def get_close(dist):
     global STATE
-    result = pid_controller(4.4, 1, 0.5, 0, x=True)
+    # result = pid_controller(4.4, 1, 0.5, 0, x=True)
+    result = pid_controller(4.5, 1, 1.5, 0, x=True)
+
     if result:
         reset_errors()
         STATE='SCAN_SEARCH'
@@ -132,7 +134,10 @@ def scan():
 
 def go_down():
     # result = pid_controller(-0.65, 1.5, 0, 0)
-    result = pid_controller(-0.6, 2.0, 2.1, 0.08)
+    # result = pid_controller(-0.6, 2.0, 2.1, 0.08)
+    result = pid_controller(-0.6, 1, 1.0, 0, min_error=9e-3)
+
+    print('GO_DOWN BIRD_POSITION[1]={}'.format(bird_position[1]))
     if result:
         reset_vars()
         return True
@@ -140,7 +145,9 @@ def go_down():
 
 def go_up():
     # result = pid_controller(0.8, 1.5, 0, 0.)
-    result = pid_controller(0.8, 2.0, 2.1, 0.08)
+    # result = pid_controller(0.8, 2.0, 2.1, 0.08)
+    result = pid_controller(0.8, 1.0, 1.0, 0, min_error=5e-3)
+
     if result:
         reset_vars()
         return True
@@ -149,31 +156,38 @@ def go_up():
 # substate machine to traverse asteroid field
 def traverse():
     global TRAVERSE_STATE
+    print(TRAVERSE_STATE)
     if TRAVERSE_STATE == 'WAITING':
         TRAVERSE_STATE = 'GO_TO_SPACE'
-    elif TRAVERSE_STATE == 'GO_TO_SPACE':
+    if TRAVERSE_STATE == 'GO_TO_SPACE':
         if go_to_space():
             TRAVERSE_STATE = 'TRASPASS'
-    elif TRAVERSE_STATE == 'TRASPASS':
+    if TRAVERSE_STATE == 'TRASPASS':
+        pass
         traspass()
     return
 
 # goal in y direction to empty spot in the asteroid field
 def go_to_space():
-    result = pid_controller(y_coord_hole, 2.0, 1.8, 0.08)
+    print('GO TO SPACE')
+    result = pid_controller(y_coord_hole, 1.1, 2.0, 0.35, min_error=1e-3)
     if result:
+        print('GO TO SPACE RESULT IS TRUE!!')
         reset_errors()
         return True
+    else:
+        return False
 
 # cross asteroid field, goal in x direction
 def traspass():
     global goal, semaphore
     if semaphore == 0:
+        rospy.sleep(0.1)
         semaphore=1
-        goal = bird_position[0]+1.9
+        goal = bird_position[0]+1.5
 
-    result = pid_controller(goal, 2.0, 1., 0, x=True)
-
+    print('TRASPASING')
+    result = pid_controller(goal, 1, 1, 0.1, x=True)
     if result:
         reset_errors()
         reset_vars()
@@ -215,9 +229,11 @@ def pid_controller(g, K_P, K_D, K_I, x=False, min_error=1e-2):
     
     print('error={}, u={}'.format(abs(abs(g) - abs(bird_pose)), u))
     e_prev = e
-    if abs(abs(g) - abs(bird_pose)) < min_error:
+    if abs(abs(g) - abs(bird_pose)) <= min_error:
+        print('True')
         return True
     else:
+        print('False')
         return False
 
 
