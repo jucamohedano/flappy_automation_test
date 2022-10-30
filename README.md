@@ -2,6 +2,8 @@
 
 This repository contains the Flappy Bird game modified to be controlled with ROS.
 
+[Video of the solution in this repository](https://www.youtube.com/watch?v=vo6cJu9px4c)
+
 ## Game Description
 
 Flappy Bird is in trouble again! This time it went into space and landed in an asteroid belt. If Flappy Bird collides with the asteroids it would be fatal. Luckily Flappy remembered his laser scanner that provides distance measurements. It will give you its velocity and the laserscans in return for an acceleration input. Flappy Bird only asks for 60 seconds of your guidance. Help Flappy Bird go through as many asteroid lines as possible before the time runs out!     
